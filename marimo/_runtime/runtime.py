@@ -250,7 +250,9 @@ def app_meta() -> AppMeta:
         import altair as alt
 
         # Enable dark theme for Altair when marimo is in dark mode
-        alt.themes.enable("dark" if mo.app_meta().theme == "dark" else "default")
+        alt.themes.enable(
+            "dark" if mo.app_meta().theme == "dark" else "default"
+        )
         ```
 
         Show content only in edit mode:
@@ -317,8 +319,17 @@ def notebook_dir() -> pathlib.Path | None:
     return None
 
 
+class URLPath(pathlib.PurePosixPath):
+    """
+    Wrapper around pathlib.Path that preserves the "://" in the URL protocol.
+    """
+
+    def __str__(self) -> str:
+        return super().__str__().replace(":/", "://")
+
+
 @mddoc
-def notebook_location() -> pathlib.Path | None:
+def notebook_location() -> pathlib.PurePath | None:
     """Get the location of the currently executing notebook.
 
     In WASM, this is the URL of webpage, for example, `https://my-site.com`.
@@ -342,7 +353,7 @@ def notebook_location() -> pathlib.Path | None:
         ```
 
     Returns:
-        pathlib.Path | None: A pathlib.Path object representing the URL or directory of the current
+        Path | None: A Path object representing the URL or directory of the current
             notebook, or None if the notebook's directory cannot be determined.
     """
     if is_pyodide():
@@ -352,11 +363,14 @@ def notebook_location() -> pathlib.Path | None:
         # The location looks like https://marimo-team.github.io/marimo-gh-pages-template/notebooks/assets/worker-BxJ8HeOy.js
         # We want to crawl out of the assets/ folder
         if "assets" in path_location.parts:
-            return path_location.parent.parent
-        return path_location
+            return URLPath(str(path_location.parent.parent))
+        return URLPath(str(path_location))
 
     else:
-        return notebook_dir()
+        nb_dir = notebook_dir()
+        if nb_dir is not None:
+            return nb_dir
+        return None
 
 
 @dataclasses.dataclass
@@ -534,6 +548,13 @@ class Kernel:
             or package_manager != self.package_manager.name
         ):
             self.package_manager = create_package_manager(package_manager)
+
+            if self._should_update_script_metadata():
+                # All marimo notebooks depend on the marimo package; if the
+                # notebook already has marimo as a dependency, or an optional
+                # dependency group with marimo, such as marimo[sql], this is a
+                # NOOP.
+                self._update_script_metadata(["marimo"])
 
         if (
             autoreload_mode == "lazy" or autoreload_mode == "autorun"
@@ -1878,11 +1899,13 @@ class Kernel:
             return
 
         missing_packages_set = set(request.versions.keys())
-        # Append missing modules
+        # Append all other missing packages from the notebook; the missing
+        # package request only contains the packages from the cell the user
+        # executed.
         missing_packages_set.update(
             [
-                self.package_manager.package_to_module(pkg)
-                for pkg in self.module_registry.missing_modules()
+                self.package_manager.module_to_package(module)
+                for module in self.module_registry.missing_modules()
             ]
         )
         missing_packages = list(sorted(missing_packages_set))
